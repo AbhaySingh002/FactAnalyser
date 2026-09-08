@@ -1,0 +1,42 @@
+ROLE: Senior document-intelligence engineer.
+
+CONTEXT: <paste SHARED CONTEXT BLOCK>
+Phase 1 exists (schema, db.py, storage.py, upload endpoint with run_pipeline stub).
+
+OBJECTIVE: Replace the stub with real Stages 1-2: layout-aware parsing with bounding boxes,
+page-image rendering, and the OCR routing factory (text path vs scan path).
+
+DELIVERABLES:
+1. api/pipeline/parse.py — PyMuPDF (fitz):
+   - open PDF from R2 bytes; for each page: text_chars = len(page.get_text().strip()).
+   - TRIAGE: text_chars < 40 => page is 'scan', else 'text'.
+   - Text pages: page.get_text("dict") -> walk blocks/lines/spans; merge lines into paragraph chunks
+     preserving union bbox [x0,y0,x1,y1] and page; detect headings via font size > median*1.2;
+     page.find_tables() -> each table becomes chunk_type='table' with markdown-style text
+     (header row + rows) and table bbox; keep cell row text intact.
+   - Emit list of ChunkData(page, chunk_type, text, bbox, heading).
+2. api/pipeline/render_pages.py — page.get_pixmap(dpi=150) -> PNG bytes -> storage.put_page_png;
+   store page width/height in a pages meta dict returned to caller (needed later for bbox overlay scaling).
+3. api/pipeline/ocr_client.py — async function ocr_page(png_bytes) -> (markdown, provider):
+   - PRIMARY Groq: chat.completions, model llama-4-scout vision, message with base64 image_url,
+     prompt: "Transcribe this document page as markdown. Preserve tables as markdown tables,
+     keep reading order and headings. Output only the markdown." temperature 0.
+   - FALLBACK Gemini: generate_content with inline_data image/png, same instruction.
+   - On both failing: raise OcrUnavailable (caller marks page needs_review).
+   - Log audit row: action='ocr', meta={provider, latency_ms, approx_tokens}.
+4. api/pipeline/chunk.py — persist ChunkData rows into chunks table; for scan pages, split OCR markdown
+   by heading/table into chunks with chunk_type='ocr_block', bbox=null, ocr_provider recorded.
+5. Wire into run_pipeline: stage 'parse' -> parse + render pages; stage 'route' -> per-page factory
+   (text chunks vs ocr chunks); update jobs stage/status; on exception set status='failed' + error + audit.
+
+CONSTRAINTS: bbox coordinates stored exactly as PyMuPDF reports (PDF points, origin top-left);
+never truncate chunk text; table chunks must keep header context inside the text (a number without
+its column header is meaningless); OCR only invoked for scan pages (cost control).
+
+ACCEPTANCE CRITERIA:
+- Upload a native-text PDF: chunks rows with non-null bbox, headings captured, tables as 'table' chunks.
+- Upload a scanned/image PDF: ocr_provider in {'groq-vision','gemini-vision'}, page PNGs visible in R2
+  under pages/{doc_id}/{n}.png.
+- jobs ends stage='route', status='done'; audit contains one ocr row per scanned page.
+
+COMMIT MESSAGE: "feat(pipeline): layout-aware parsing with bbox provenance + Groq/Gemini OCR routing factory"

@@ -1,0 +1,31 @@
+PROJECT: "Fact Knowledge Layer" — financial/legal due-diligence prototype (intern assignment).
+Extracts facts from uploaded PDFs, grounds every fact in evidence (page + bbox + verbatim quote),
+reconciles facts across documents (corroborates / contradicts / contextual_variance / needs_review),
+and answers grounded chat questions with citations.
+
+STACK (all free tier):
+- Backend: Python 3.11 + FastAPI, deployed on Render free web service (stateless; ephemeral disk).
+- DB: Render Managed Postgres + pgvector extension. Single source of truth.
+- Files: Cloudflare R2 bucket (original PDFs + rendered page PNGs). Public read URL enabled.
+- AI: Groq API (llama-3.3-70b-versatile for text extraction & chat; llama-4-scout vision for OCR),
+  Gemini API (gemini flash vision = OCR fallback; gemini embedding model, 768 dims, for vectors).
+- Frontend (later phase): Next.js 14 App Router + Tailwind + shadcn/ui on Vercel.
+
+REPO LAYOUT:
+api/            main.py, db.py, storage.py, pipeline/{parse,ocr_client,chunk,extract,normalize,embed,reconcile}.py
+api/schema.sql  full DDL
+web/            Next.js app (phase 6)
+README.md, .env.example
+
+ENV VARS: DATABASE_URL, GROQ_API_KEY, GEMINI_API_KEY, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
+R2_SECRET_ACCESS_KEY, R2_BUCKET, R2_PUBLIC_URL
+
+HARD PRINCIPLES (non-negotiable):
+1. PROVENANCE: every fact stores chunk_id, page, bbox, verbatim quote, model name, prompt_ver.
+2. DETERMINISTIC WRAPPER: LLMs only extract/interpret inside strict JSON schemas; all comparisons,
+   unit conversions, tolerances, and relation decisions are plain Python rules.
+3. NO HARD-CODING: no document-specific rules, filenames, or fixed fact schemas. New attribute types
+   create new rows in attribute_namespace (dynamic schema), never code changes.
+4. AUDIT EVERYTHING: every LLM call and every reconciliation decision writes an audit row.
+5. INCREMENTAL: new uploads process only new chunks/facts; reconciliation runs new facts vs existing.
+6. Free-tier safe: no local models on Render; stream files to R2; jobs table = queue.

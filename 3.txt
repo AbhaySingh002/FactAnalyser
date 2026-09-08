@@ -1,0 +1,44 @@
+ROLE: Senior AI engineer (schema-constrained generation specialist).
+
+CONTEXT: <paste SHARED CONTEXT BLOCK>
+Phases 1-2 exist: chunks table populated with provenance (page, bbox, quote-able text, ocr_provider).
+
+OBJECTIVE: Stages 3-5: extract structured facts per chunk with Groq, normalize deterministically,
+embed with Gemini into pgvector. Facts must be comparable across documents.
+
+DELIVERABLES:
+1. api/pipeline/extract.py:
+   - Pydantic model FactExtract: entity, entity_type, attribute, raw_value, value_number(float|null),
+     unit|null, currency|null, period|null, scope|null, quote(str), confidence(0..1).
+     Wrapper model: {"facts": [FactExtract]}.
+   - PROMPT (prompt_ver='v1'): system="You are a factual extraction engine for financial/legal documents.
+     Extract ONLY discrete claims explicitly present. Every fact MUST include a verbatim quote from the
+     chunk. Never infer values. Return only JSON matching the schema." + schema description + chunk text
+     with its heading and chunk_type as context.
+   - Groq llama-3.3-70b-versatile, temperature=0, response_format json_object; validate with Pydantic;
+     ONE retry appending validation errors; final failure -> store single fact with confidence=0.15,
+     attribute='extraction_failure', quote=first 300 chars (this becomes the required failure case).
+   - Verify quote is a fuzzy substring of chunk text (rapidfuzz ratio > 85) else downgrade confidence.
+   - audit row per chunk: model, prompt_ver, tokens, latency.
+2. api/pipeline/normalize.py (pure Python, no LLM):
+   - numbers: "50 million"->5e7, "20 crore"->2e8, "1,234.5"->1234.5, percentages.
+   - currency/unit canonical: $/USD/usd->USD; ₹/INR/Rs->INR; units pct|currency|count|date|text.
+   - period canonical: FY23/FY2023/"year ended Mar 2023"->FY2023; Q3 2023->2023-Q3; plain year->YYYY.
+   - entity_canon: lowercase, strip pvt/ltd/limited/inc/co, collapse spaces; check entity_aliases table;
+     rapidfuzz > 92 against existing canonical entities -> reuse + insert alias row; else new canonical.
+   - attribute_canon: embed attribute text (Gemini), cosine vs attribute_namespace; > 0.90 -> existing
+     canonical (dynamic schema evolution); else insert new canonical row. Store both canon columns on fact.
+3. api/pipeline/embed.py — batch embed f"{entity} {attribute} {raw_value} {period} {scope} :: {quote}"
+   with Gemini embedding model (768 dims) -> facts.embedding.
+4. run_pipeline stages: 'extract' -> 'normalize' -> 'embed'; jobs updated per stage; failures isolated
+   per chunk (one bad chunk must not kill the document).
+
+CONSTRAINTS: LLM never decides relation/comparison; normalization tables are code constants (documented);
+confidence thresholds are named constants at top of file.
+
+ACCEPTANCE CRITERIA:
+- facts rows exist for a financial PDF with norm_value/currency/period filled; quote matches source text.
+- attribute_namespace grew new rows for unseen attribute phrasings (proves dynamic schema).
+- Every fact has non-null embedding; audit shows one extract row per chunk.
+
+COMMIT MESSAGE: "feat(pipeline): schema-constrained fact extraction + deterministic normalization + pgvector embeddings"

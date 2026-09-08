@@ -1,0 +1,46 @@
+ROLE: Senior backend engineer.
+
+CONTEXT: <paste SHARED CONTEXT BLOCK>
+
+OBJECTIVE: Build the storage + job foundation. After this phase I can upload a PDF via API,
+it lands in R2, and a job row tracks future pipeline stages.
+
+DELIVERABLES:
+1. api/schema.sql — full DDL:
+   - CREATE EXTENSION vector;
+   - documents(id uuid pk, filename, sha256 unique, r2_key, page_count int, status text default 'uploaded', created_at)
+   - chunks(id uuid pk, document_id fk, page int, chunk_type text, text, bbox jsonb, heading text, ocr_provider text, created_at)
+   - facts(id uuid pk, chunk_id fk, document_id fk, entity, attribute, entity_canon, attribute_canon,
+           raw_value, norm_value numeric, norm_unit, currency, period, scope, quote, confidence real,
+           model, prompt_ver, embedding vector(768), created_at)
+   - fact_relations(id uuid pk, fact_a fk, fact_b fk, relation text, explanation text, rules_applied jsonb, confidence real, created_at)
+   - attribute_namespace(canonical text pk, embedding vector(768), first_seen_at)
+   - entity_aliases(alias text pk, canonical text)
+   - jobs(id uuid pk, document_id fk, stage text, status text, error text, updated_at)
+   - audit(id bigserial pk, at timestamptz, actor text, action text, target jsonb, meta jsonb)
+   - Indexes: hnsw on facts.embedding (vector_cosine_ops), hnsw on attribute_namespace.embedding,
+     btree on facts(entity_canon, attribute_canon), btree on chunks(document_id, page).
+2. api/db.py — psycopg3 connection pool from DATABASE_URL; helpers: new_document(), new_job(),
+   set_job(stage,status,error), audit(action,target,meta), fetch helpers used later.
+3. api/storage.py — boto3 S3 client pointed at R2 endpoint https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com;
+   functions: put_pdf(sha, bytes) -> key, put_page_png(doc_id, page, bytes) -> key, public_url(key).
+4. api/main.py — FastAPI app:
+   - CORS allow Vercel origin (env FRONTEND_ORIGIN, default *).
+   - GET /health -> {"ok": true}.
+   - POST /documents (UploadFile): compute sha256; if exists return existing doc (dedupe);
+     stream bytes to R2; insert documents + jobs(stage='queued'); schedule
+     FastAPI BackgroundTasks run_pipeline(doc_id) as a STUB that only sets stage='parse', status='running'
+     then 'done' for now (real pipeline arrives Phase 2-4).
+   - GET /documents, GET /jobs/{id}.
+5. requirements.txt (fastapi, uvicorn, psycopg[binary,pool], boto3, pypdf-utils none), .env.example,
+   and a short api/README section "run locally".
+
+CONSTRAINTS: no file ever persisted to local disk beyond a temp buffer; all DB writes via db.py helpers;
+every endpoint returns JSON with explicit error shapes {"error": ...}; audit row on upload.
+
+ACCEPTANCE CRITERIA:
+- curl -F "file=@sample.pdf" {local}/documents returns {document_id, job_id}.
+- R2 console shows docs/{sha256}.pdf; documents + jobs rows exist; /jobs/{id} shows stage transitions.
+- Re-uploading same PDF returns the same document_id (dedupe works).
+
+COMMIT MESSAGE: "feat(api): storage foundation — R2 upload, sha256 dedupe, job state machine, pgvector schema"

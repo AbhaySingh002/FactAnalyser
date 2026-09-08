@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+psycopg[binary,pool]
+boto3
+python-multipart
+PyMuPDF
+openai
+google-genai
+rapidfuzz
