@@ -1,10 +1,12 @@
-"""FastAPI app — Phase 1-5: ingestion, reconciliation, matrix, fact RAG."""
-
+import asyncio
+import collections
 import hashlib
 import os
+import time
 import traceback
 
 from fastapi import BackgroundTasks, FastAPI, UploadFile, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
@@ -34,10 +36,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_ip_rate_limits: dict[str, collections.deque[float]] = collections.defaultdict(collections.deque)
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "20"))
+
+
+@app.middleware("http")
+async def guards_middleware(request: Request, call_next):
+    # Skip rate limiting for health checks
+    if request.url.path != "/health":
+        client_ip = request.client.host if request.client else "127.0.0.1"
+        now = time.monotonic()
+        window = _ip_rate_limits[client_ip]
+
+        while window and window[0] <= now - 60.0:
+            window.popleft()
+
+        if len(window) >= RATE_LIMIT_PER_MINUTE:
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Rate limit exceeded (max 20 req/min)"},
+            )
+        window.append(now)
+
+    try:
+        return await asyncio.wait_for(call_next(request), timeout=60.0)
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"error": "Request timed out after 60s"})
+
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"error": str(exc)})
 
 
 @app.exception_handler(Exception)
@@ -257,6 +291,12 @@ def list_facts(
             "chunk_id": str(f["chunk_id"]) if f.get("chunk_id") else None,
             "created_at": f["created_at"].isoformat() if f.get("created_at") else None,
             "embedding": None,
+            "quote": f.get("quote"),
+            "page": f.get("page"),
+            "bbox": f.get("bbox"),
+            "filename": f.get("filename"),
+            "confidence": f.get("confidence"),
+            "relations_summary": f.get("relations_summary") or [],
         }
         for f in facts
     ]
@@ -298,6 +338,22 @@ def get_page_image(document_id: str, page: int):
         headers["X-Page-Width"] = str(page_row["width"])
         headers["X-Page-Height"] = str(page_row["height"])
     return RedirectResponse(url=url, status_code=302, headers=headers)
+
+
+@app.get("/pages/{document_id}/{page}/meta")
+def get_page_meta(document_id: str, page: int):
+    page_row = db.get_page(document_id, page)
+    if not page_row:
+        raise HTTPException(404, detail=f"Page {page} for document {document_id} not found")
+    png_url = storage.public_url(page_row["png_key"] if page_row.get("png_key") else f"pages/{document_id}/{page}.png")
+    return {
+        "document_id": document_id,
+        "page": page,
+        "width": page_row.get("width"),
+        "height": page_row.get("height"),
+        "route": page_row.get("route"),
+        "png_url": png_url,
+    }
 
 
 

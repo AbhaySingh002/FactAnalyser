@@ -439,6 +439,8 @@ def get_matrix_data() -> dict:
             badge = "contradicts"
         elif "contextual_variance" in rels:
             badge = "contextual_variance"
+        elif "needs_review" in rels:
+            badge = "needs_review"
         elif "corroborates" in rels:
             badge = "corroborates"
         else:
@@ -453,9 +455,10 @@ def get_matrix_data() -> dict:
     return {
         "entities": sorted(list(entities_set)),
         "attributes": sorted(list(attributes_set)),
-        "cells": cell_details,
-        "cell_facts": cells,
+        "cells": cells,
         "cell_badges": cell_badges,
+        "cell_details": cell_details,
+        "cell_facts": cells,
     }
 
 
@@ -471,7 +474,12 @@ def search_facts(
         if query_vector:
             emb_str = json.dumps(query_vector)
             sql = """
-                SELECT f.*, c.page, c.bbox, d.filename
+                SELECT f.*, c.page, c.bbox, d.filename,
+                       COALESCE((
+                           SELECT ARRAY_AGG(DISTINCT r.relation)
+                           FROM fact_relations r
+                           WHERE r.fact_a = f.id OR r.fact_b = f.id
+                       ), ARRAY[]::text[]) AS relations_summary
                 FROM facts f
                 JOIN documents d ON f.document_id = d.id
                 LEFT JOIN chunks c ON f.chunk_id = c.id
@@ -488,7 +496,12 @@ def search_facts(
             ).fetchall()
         else:
             sql = """
-                SELECT f.*, c.page, c.bbox, d.filename
+                SELECT f.*, c.page, c.bbox, d.filename,
+                       COALESCE((
+                           SELECT ARRAY_AGG(DISTINCT r.relation)
+                           FROM fact_relations r
+                           WHERE r.fact_a = f.id OR r.fact_b = f.id
+                       ), ARRAY[]::text[]) AS relations_summary
                 FROM facts f
                 JOIN documents d ON f.document_id = d.id
                 LEFT JOIN chunks c ON f.chunk_id = c.id
@@ -519,7 +532,12 @@ def search_facts_keyword(tokens: list[str], limit: int = 5) -> list[dict]:
 
         where_clause = " OR ".join(clauses)
         sql = f"""
-            SELECT f.*, c.page, c.bbox, d.filename
+            SELECT f.*, c.page, c.bbox, d.filename,
+                   COALESCE((
+                       SELECT ARRAY_AGG(DISTINCT r.relation)
+                       FROM fact_relations r
+                       WHERE r.fact_a = f.id OR r.fact_b = f.id
+                   ), ARRAY[]::text[]) AS relations_summary
             FROM facts f
             JOIN documents d ON f.document_id = d.id
             LEFT JOIN chunks c ON f.chunk_id = c.id
@@ -533,10 +551,14 @@ def search_facts_keyword(tokens: list[str], limit: int = 5) -> list[dict]:
 
 
 def get_fact_lineage_audit(fact_id: str) -> list[dict]:
-    """Retrieve audit lineage for a given fact."""
+    """Retrieve ordered audit lineage for a given fact: ocr row (if any), extract row, reconcile rows."""
     with pool.connection() as conn:
         fact = conn.execute(
-            "SELECT id, document_id, chunk_id FROM facts WHERE id = %s", (str(fact_id),)
+            """SELECT f.id, f.document_id, f.chunk_id, c.page
+               FROM facts f
+               LEFT JOIN chunks c ON f.chunk_id = c.id
+               WHERE f.id = %s""",
+            (str(fact_id),),
         ).fetchone()
 
         if not fact:
@@ -544,18 +566,55 @@ def get_fact_lineage_audit(fact_id: str) -> list[dict]:
 
         doc_id = str(fact["document_id"])
         chunk_id = str(fact["chunk_id"]) if fact["chunk_id"] else None
+        page = fact.get("page")
 
-        rows = conn.execute(
+        # 1. OCR row (if any)
+        ocr_rows = []
+        if page is not None:
+            ocr_rows = conn.execute(
+                """SELECT * FROM audit
+                   WHERE action LIKE 'ocr%%'
+                     AND ((target->>'document_id' = %s AND (target->>'page')::int = %s)
+                          OR ((meta->>'page')::int = %s AND (target->>'document_id' = %s OR meta->>'document_id' = %s)))
+                   ORDER BY at ASC LIMIT 1""",
+                (doc_id, page, page, doc_id, doc_id),
+            ).fetchall()
+
+        # 2. Extract row for this chunk/fact
+        extract_rows = []
+        if chunk_id:
+            extract_rows = conn.execute(
+                """SELECT * FROM audit
+                   WHERE (action LIKE '%%extract%%' OR action = 'extract')
+                     AND (target->>'chunk_id' = %s OR meta->>'chunk_id' = %s)
+                   ORDER BY at ASC LIMIT 1""",
+                (chunk_id, chunk_id),
+            ).fetchall()
+
+        # 3. Reconcile rows involving this fact
+        reconcile_rows = conn.execute(
             """SELECT * FROM audit
-               WHERE (target->>'fact_id' = %s)
-                  OR (target->>'chunk_id' = %s)
-                  OR (target->>'document_id' = %s)
-                  OR (meta::text ILIKE %s)
+               WHERE action = 'reconcile'
+                 AND (target->>'fact_id' = %s
+                      OR (meta->'pair_ids' ? %s)
+                      OR (meta::text ILIKE %s))
                ORDER BY at ASC""",
-            (str(fact_id), chunk_id, doc_id, f"%{fact_id}%"),
+            (str(fact_id), str(fact_id), f"%{fact_id}%"),
         ).fetchall()
 
-        return [dict(r) for r in rows]
+        # Combined ordered lineage
+        all_rows = list(ocr_rows) + list(extract_rows) + list(reconcile_rows)
+        if not all_rows:
+            all_rows = conn.execute(
+                """SELECT * FROM audit
+                   WHERE (target->>'fact_id' = %s)
+                      OR (target->>'chunk_id' = %s)
+                      OR (meta::text ILIKE %s)
+                   ORDER BY at ASC""",
+                (str(fact_id), chunk_id, f"%{fact_id}%"),
+            ).fetchall()
+
+        return [dict(r) for r in all_rows]
 
 
 def audit(action: str, target: dict | None = None, meta: dict | None = None, actor: str = "system"):

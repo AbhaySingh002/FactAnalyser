@@ -114,8 +114,8 @@ export interface AuditRow {
   id: string;
   actor: string;
   action: string;
-  target?: Record<string, any>;
-  meta?: Record<string, any>;
+  target?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
   at: string;
 }
 

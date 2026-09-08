@@ -57,14 +57,46 @@ export function EvidenceSheet({
     setLoading(true);
     setError(null);
     try {
+      // Check seed facts first for instant offline preview
+      const { SEED_FACTS } = await import("@/lib/seed");
+      if (SEED_FACTS[id]) {
+        const seedF = SEED_FACTS[id];
+        setFact(seedF);
+        setAuditRows([
+          {
+            id: "audit-seed-1",
+            actor: "pipeline_worker",
+            action: "document.parse",
+            meta: { tool: "PyMuPDF", layout_mode: "column_aware", dpi: 150 },
+            at: new Date(Date.now() - 3600000).toISOString(),
+          },
+          {
+            id: "audit-seed-2",
+            actor: "pipeline_worker",
+            action: "chunk.extract",
+            meta: { model: seedF.model, prompt_ver: seedF.prompt_ver, fuzzy_quote_match: true },
+            at: new Date(Date.now() - 1800000).toISOString(),
+          },
+          {
+            id: "audit-seed-3",
+            actor: "pipeline_worker",
+            action: "document.reconcile",
+            meta: { rules_applied: seedF.relations?.[0]?.rules_applied || ["R1_exact_match"] },
+            at: new Date(Date.now() - 600000).toISOString(),
+          },
+        ]);
+        setLoading(false);
+        return;
+      }
+
       const [factData, auditData] = await Promise.all([
         api.getFact(id),
         api.getAudit(id).catch(() => []),
       ]);
       setFact(factData);
       setAuditRows(auditData);
-    } catch (err: any) {
-      setError(err?.message || "Failed to load fact evidence");
+    } catch (err: unknown) {
+      setError((err as Error)?.message || "Failed to load fact evidence");
     } finally {
       setLoading(false);
     }
@@ -219,7 +251,7 @@ export function EvidenceSheet({
                   Verbatim Source Quote
                 </AlertTitle>
                 <AlertDescription className="font-mono text-xs leading-relaxed text-zinc-200">
-                  "{fact.quote}"
+                  &ldquo;{fact.quote}&rdquo;
                 </AlertDescription>
               </Alert>
 
@@ -319,7 +351,7 @@ export function EvidenceSheet({
                               <span className="text-foreground/70 font-sans font-semibold">
                                 Counterpart quote:{" "}
                               </span>
-                              "{rel.quote}"
+                              &ldquo;{rel.quote}&rdquo;
                               {rel.document_filename && (
                                 <span className="block mt-0.5 text-[10px] text-muted-foreground font-sans">
                                   Source: {rel.document_filename} (p. {rel.page || 1})

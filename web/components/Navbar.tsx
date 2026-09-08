@@ -8,11 +8,7 @@ import {
   Table,
   MessageSquare,
   Network,
-  CheckCircle2,
-  ShieldAlert,
   Layers,
-  Activity,
-  ExternalLink,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

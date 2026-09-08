@@ -46,12 +46,13 @@ export function useJob(jobId: string | null | undefined, options?: UseJobOptions
 
   const prevStatusRef = useRef<string | null>(null);
   const optionsRef = useRef(options);
-  optionsRef.current = options;
+
+  useEffect(() => {
+    optionsRef.current = options;
+  }, [options]);
 
   useEffect(() => {
     if (!jobId) {
-      setJob(null);
-      setError(null);
       return;
     }
 
@@ -90,9 +91,9 @@ export function useJob(jobId: string | null | undefined, options?: UseJobOptions
         if (j.status !== "done" && j.status !== "failed") {
           timer = setTimeout(poll, 2000);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (!isMounted) return;
-        const msg = err?.message || "Failed to fetch job status";
+        const msg = (err as Error)?.message || "Failed to fetch job status";
         setError(msg);
         // Continue polling even on intermittent network glitches
         timer = setTimeout(poll, 3000);
@@ -110,17 +111,18 @@ export function useJob(jobId: string | null | undefined, options?: UseJobOptions
     };
   }, [jobId]);
 
-  const progress = job ? STAGE_PROGRESS[job.stage] ?? 0 : 0;
-  const label = job ? STAGE_LABELS[job.stage] ?? job.stage : "Idle";
+  const activeJob = jobId ? job : null;
+  const progress = activeJob ? STAGE_PROGRESS[activeJob.stage] ?? 0 : 0;
+  const label = activeJob ? STAGE_LABELS[activeJob.stage] ?? activeJob.stage : "Idle";
 
   return {
-    job,
+    job: activeJob,
     loading,
-    error,
+    error: jobId ? error : null,
     progress,
     label,
-    isDone: job?.status === "done",
-    isFailed: job?.status === "failed",
-    isRunning: job?.status === "running" || job?.status === "pending",
+    isDone: activeJob?.status === "done",
+    isFailed: activeJob?.status === "failed",
+    isRunning: activeJob?.status === "running" || activeJob?.status === "pending",
   };
 }

@@ -77,7 +77,6 @@ export function BBoxPageViewer({
   // PDF pageWidth = naturalWidth / (150 / 72)
   const dpiRatio = 150 / 72; // ~2.0833
   const pdfPageWidth = naturalDims.width ? naturalDims.width / dpiRatio : 612;
-  const pdfPageHeight = naturalDims.height ? naturalDims.height / dpiRatio : 792;
 
   let highlightStyle: React.CSSProperties | null = null;
 
@@ -216,7 +215,7 @@ export function BBoxPageViewer({
       {quote && (
         <div className="rounded bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground border-l-2 border-emerald-500">
           <span className="font-semibold text-foreground/80">Matched text: </span>
-          <span className="font-mono text-zinc-300">"{quote}"</span>
+          <span className="font-mono text-zinc-300">&ldquo;{quote}&rdquo;</span>
         </div>
       )}
     </div>
