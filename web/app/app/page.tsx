@@ -5,18 +5,20 @@ import Link from "next/link";
 import {
   UploadCloud,
   FileText,
-  Table as TableIcon,
   CheckCircle2,
   AlertTriangle,
   RotateCcw,
   Loader2,
   Layers,
   ArrowRight,
+  Clock,
+  ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Table,
   TableBody,
@@ -175,39 +177,49 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border/60 pb-5">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">
-            Document Repository
+            Documents
           </h1>
           <p className="text-xs sm:text-sm text-muted-foreground mt-0.5">
-            Ingest financial reports, filings, and contracts for provenance extraction and cross-reconciliation.
+            Upload financial reports, filings, and contracts.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          <Link href="/app/matrix">
-            <Button className="h-9 px-3.5 text-xs bg-emerald-500 text-zinc-950 hover:bg-emerald-400 font-semibold shadow-xs">
-              <TableIcon className="size-3.5 mr-1.5" />
-              Open Matrix
+          <Link href="/app/audit">
+            <Button size="sm">
+              <ShieldCheck className="size-3.5 mr-1.5" />
+              Audit
               <ArrowRight className="size-3.5 ml-1" />
             </Button>
           </Link>
         </div>
       </div>
 
+      {/* Cold-Start Notice Alert */}
+      <Alert className="border-amber-500/30 bg-amber-500/5 py-2.5 px-3.5">
+        <Clock className="size-4 text-amber-400" />
+        <AlertDescription className="text-xs text-muted-foreground flex items-center justify-between gap-2">
+          <span>
+            <strong className="text-foreground font-medium">Notice:</strong> Hosted backend spins down when idle on free tier. First API request or upload may take ~60s to wake the instance.
+          </span>
+          <Badge variant="outline" className="border-amber-500/30 text-amber-400 font-mono text-[10px] hidden sm:inline-flex shrink-0">
+            Cold Start ~60s
+          </Badge>
+        </AlertDescription>
+      </Alert>
+
       {/* Upload Dropzone Card */}
       <Card className="border-border/70 bg-card/50 backdrop-blur">
         <CardHeader className="pb-3">
           <CardTitle className="text-sm font-semibold flex items-center gap-2">
             <UploadCloud className="size-4 text-emerald-400" />
-            Ingest Document (PDF)
+            Upload Document (PDF)
           </CardTitle>
-          <CardDescription className="text-xs">
-            Documents undergo automated layout parsing, vision OCR fallback, structured claim extraction, and cross-reconciliation.
-          </CardDescription>
         </CardHeader>
         <CardContent>
           <div
@@ -249,7 +261,6 @@ export default function DashboardPage() {
                     size="sm"
                     onClick={handleUpload}
                     disabled={isUploading}
-                    className="h-8 px-3 text-xs bg-emerald-500 text-zinc-950 hover:bg-emerald-400 font-medium"
                   >
                     {isUploading ? (
                       <>
@@ -257,7 +268,7 @@ export default function DashboardPage() {
                         Processing...
                       </>
                     ) : (
-                      "Start Ingestion Pipeline"
+                      "Upload"
                     )}
                   </Button>
                   <Button
@@ -298,11 +309,8 @@ export default function DashboardPage() {
           <div>
             <CardTitle className="text-sm font-semibold flex items-center gap-2">
               <Layers className="size-4 text-emerald-400" />
-              Ingested Documents ({documents.length})
+              Documents ({documents.length})
             </CardTitle>
-            <CardDescription className="text-xs mt-0.5">
-              Live status and pipeline progress across knowledge base documents.
-            </CardDescription>
           </div>
 
           <Button
@@ -336,9 +344,9 @@ export default function DashboardPage() {
             <div className="p-12 text-center space-y-3">
               <FileText className="size-8 text-muted-foreground mx-auto opacity-60" />
               <div className="space-y-1">
-                <p className="text-sm font-semibold text-foreground">No documents uploaded yet</p>
+                <p className="text-sm font-semibold text-foreground">No documents</p>
                 <p className="text-xs text-muted-foreground max-w-sm mx-auto">
-                  Upload your first financial or legal PDF above to start extracting grounded facts and identifying cross-document discrepancies.
+                  Upload a PDF above to start extracting facts.
                 </p>
               </div>
             </div>
@@ -441,13 +449,13 @@ export default function DashboardPage() {
                       </TableCell>
 
                       <TableCell className="text-right">
-                        <Link href={`/app/matrix?doc=${encodeURIComponent(doc.id)}`}>
+                        <Link href="/app/audit">
                           <Button
                             variant="ghost"
                             size="sm"
                             className="h-7 px-2 text-[11px] text-muted-foreground hover:text-foreground"
                           >
-                            View Facts
+                            Audit Queue
                             <ArrowRight className="size-3 ml-1" />
                           </Button>
                         </Link>

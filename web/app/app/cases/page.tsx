@@ -46,10 +46,8 @@ export default function CasesPage() {
         api.getFacts({ limit: 100 }),
       ]);
 
-      const { SEED_FACTS } = await import("@/lib/seed");
-
-      const fMap: Record<string, Fact> = { ...SEED_FACTS };
-      const lowConf: Fact[] = [SEED_FACTS["seed-failure-a"]];
+      const fMap: Record<string, Fact> = {};
+      const lowConf: Fact[] = [];
 
       for (const f of allFacts) {
         fMap[f.id] = f;
@@ -58,54 +56,65 @@ export default function CasesPage() {
         }
       }
 
-      // If backend has no relations yet, provide curated seed relations
-      const seedRels: RelationRow[] = [
-        {
-          id: "seed-rel-corroborates",
-          a_id: "seed-corroborates-a",
-          b_id: "seed-corroborates-b",
-          a_document_id: "seed-doc-1",
-          b_document_id: "seed-doc-2",
-          relation: "corroborates",
-          explanation:
-            "Both Prospectus (p. 28) and Annual Report (p. 31) corroborate 578 million express parcel shipments for Fiscal 2022.",
-          rules_applied: ["R1_exact_match", "R2_temporal_alignment"],
-          confidence: 0.99,
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: "seed-rel-contradicts",
-          a_id: "seed-contradicts-a",
-          b_id: "seed-contradicts-b",
-          a_document_id: "seed-doc-2",
-          b_document_id: "seed-doc-3",
-          relation: "contradicts",
-          explanation:
-            "Direct discrepancy of ₹38 Cr (8.2%) between Annual Report (₹461 Cr) and Q4 Presentation (₹423 Cr) for FY24 Adjusted EBITDA.",
-          rules_applied: ["R2_numerical_mismatch", "R5_scope_divergence"],
-          confidence: 0.95,
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: "seed-rel-variance",
-          a_id: "seed-variance-a",
-          b_id: "seed-variance-b",
-          a_document_id: "seed-doc-2",
-          b_document_id: "seed-doc-3",
-          relation: "contextual_variance",
-          explanation:
-            "Variance stems from reporting scope: Earnings presentation reports core transport operations (₹7,860 Cr) while Annual Report reports total consolidated revenue (₹8,142 Cr).",
-          rules_applied: ["R3_scope_contextual_variance"],
-          confidence: 0.92,
-          created_at: new Date().toISOString(),
-        },
-      ];
-
-      const mergedRels = allRels.length > 0 ? [...allRels, ...seedRels] : seedRels;
-
-      setRelations(mergedRels);
-      setFactsMap(fMap);
-      setLowConfFacts(lowConf);
+      if (allRels.length > 0) {
+        setRelations(allRels);
+        setFactsMap(fMap);
+        setLowConfFacts(lowConf);
+      } else if (allFacts.length > 0) {
+        // Facts exist but no relations yet
+        setRelations([]);
+        setFactsMap(fMap);
+        setLowConfFacts(lowConf);
+      } else {
+        // Fresh database without uploaded files: provide reference cases
+        const { SEED_FACTS } = await import("@/lib/seed");
+        const seedFMap: Record<string, Fact> = { ...SEED_FACTS };
+        const seedLowConf: Fact[] = [SEED_FACTS["seed-failure-a"]];
+        const seedRels: RelationRow[] = [
+          {
+            id: "seed-rel-corroborates",
+            a_id: "seed-corroborates-a",
+            b_id: "seed-corroborates-b",
+            a_document_id: "seed-doc-1",
+            b_document_id: "seed-doc-2",
+            relation: "corroborates",
+            explanation:
+              "Both Prospectus (p. 28) and Annual Report (p. 31) corroborate 578 million express parcel shipments for Fiscal 2022.",
+            rules_applied: ["R1_exact_match", "R2_temporal_alignment"],
+            confidence: 0.99,
+            created_at: new Date().toISOString(),
+          },
+          {
+            id: "seed-rel-contradicts",
+            a_id: "seed-contradicts-a",
+            b_id: "seed-contradicts-b",
+            a_document_id: "seed-doc-2",
+            b_document_id: "seed-doc-3",
+            relation: "contradicts",
+            explanation:
+              "Direct discrepancy of ₹38 Cr (8.2%) between Annual Report (₹461 Cr) and Q4 Presentation (₹423 Cr) for FY24 Adjusted EBITDA.",
+            rules_applied: ["R2_numerical_mismatch", "R5_scope_divergence"],
+            confidence: 0.95,
+            created_at: new Date().toISOString(),
+          },
+          {
+            id: "seed-rel-variance",
+            a_id: "seed-variance-a",
+            b_id: "seed-variance-b",
+            a_document_id: "seed-doc-2",
+            b_document_id: "seed-doc-3",
+            relation: "contextual_variance",
+            explanation:
+              "Variance stems from reporting scope: Earnings presentation reports core transport operations (₹7,860 Cr) while Annual Report reports total consolidated revenue (₹8,142 Cr).",
+            rules_applied: ["R3_scope_contextual_variance"],
+            confidence: 0.92,
+            created_at: new Date().toISOString(),
+          },
+        ];
+        setRelations(seedRels);
+        setFactsMap(seedFMap);
+        setLowConfFacts(seedLowConf);
+      }
     } catch (err: any) {
       // Even if network fails, present the seed data gracefully
       const { SEED_FACTS } = await import("@/lib/seed");
@@ -174,18 +183,18 @@ export default function CasesPage() {
   const needsReviewRels = relations.filter((r) => r.relation === "needs_review");
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border/60 pb-5">
         <div>
           <div className="flex items-center gap-2">
             <Layers className="size-5 text-emerald-400" />
             <h1 className="text-2xl font-bold tracking-tight text-foreground">
-              Reconciliation Cases Showcase
+              Example Cases
             </h1>
           </div>
           <p className="text-xs sm:text-sm text-muted-foreground mt-0.5">
-            Curated evidence inspection across the four core assignment conditions: corroborations, contradictions, contextual variance, and review audits.
+            Explore example due diligence cases.
           </p>
         </div>
 
@@ -450,7 +459,7 @@ function renderRelationList(
                 <Button
                   size="sm"
                   onClick={() => onShowEvidence(r.a_id)}
-                  className="h-7 px-2.5 text-xs bg-muted hover:bg-muted/80 text-foreground border border-border/80"
+                  className="h-7 px-2.5 text-xs bg-muted hover:bg-muted/80 text-foreground border border-border/80 active:scale-[0.98] transition-all"
                 >
                   Show evidence
                   <ExternalLink className="size-3 ml-1.5" />

@@ -1,51 +1,33 @@
-"""Gemini embeddings for facts and dynamic attribute namespaces."""
+"""Text embeddings — routes through unified models gateway.
 
+Primary:  google/gemini-embedding-2:batch  via OpenRouter
+Fallback: Gemini native API (text-embedding-004 / gemini-embedding-001)
+Dev stub: zero-vector when no API keys are set (preserves CI behaviour)
+"""
+
+import logging
 import os
-from google import genai
-from google.genai import types
 
-EMBEDDING_MODEL = "text-embedding-004"
-EMBEDDING_DIMS = 768
+from . import models as _models
 
+logger = logging.getLogger(__name__)
 
-def _get_client() -> genai.Client | None:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        return None
-    return genai.Client(api_key=api_key)
+EMBEDDING_DIMS = int(os.environ.get("EMBEDDING_DIMS", "768"))
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Batch embed strings using Gemini text-embedding-004 (768 dims)."""
+    """Batch-embed strings.  Returns one float vector per input text."""
     if not texts:
         return []
 
-    client = _get_client()
-    if not client:
-        # ponytail: fallback mock 768-dim zero vector if GEMINI_API_KEY unset in dev/test
+    try:
+        return _models.embed(texts)
+    except Exception as e:
+        logger.warning(f"embed_texts failed via models gateway: {e}. Using zero-vector stub.")
         return [[0.0] * EMBEDDING_DIMS for _ in texts]
-
-    results: list[list[float]] = []
-    batch_size = 50
-    config = types.EmbedContentConfig(output_dimensionality=EMBEDDING_DIMS)
-
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        resp = client.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=batch,
-            config=config,
-        )
-        if resp.embeddings:
-            for emb in resp.embeddings:
-                results.append(list(emb.values))
-        else:
-            results.extend([[0.0] * EMBEDDING_DIMS for _ in batch])
-
-    return results
 
 
 def embed_text(text: str) -> list[float]:
-    """Embed single string (768 dims)."""
+    """Embed a single string."""
     res = embed_texts([text])
     return res[0] if res else [0.0] * EMBEDDING_DIMS

@@ -1,0 +1,56 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: factlayer_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: factlayer
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./api/schema.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d factlayer"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: factlayer_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@db:5432/factlayer
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-}
+      R2_PUBLIC_URL: ${R2_PUBLIC_URL:-}
+      OCR_PROVIDER: ${OCR_PROVIDER:-gemini}
+      EXTRACTION_MODEL: ${EXTRACTION_MODEL:-openai/gpt-4o-mini}
+      CHAT_MODEL: ${CHAT_MODEL:-openai/gpt-4o-mini}
+      GEMINI_VISION_MODEL: ${GEMINI_VISION_MODEL:-gemini-3.6-flash}
+      GEMINI_CHAT_MODEL: ${GEMINI_CHAT_MODEL:-gemini-3.6-flash}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-google/gemini-embedding-2:batch}
+      RATE_LIMIT_SLEEP_SECONDS: ${RATE_LIMIT_SLEEP_SECONDS:-7.0}
+      GEMINI_MIN_INTERVAL: ${GEMINI_MIN_INTERVAL:-7.0}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-*}
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./scratch:/app/scratch
+
+volumes:
+  pgdata:

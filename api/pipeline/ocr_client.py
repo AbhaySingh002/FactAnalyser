@@ -23,12 +23,13 @@ import time
 from typing import Callable
 
 from .. import db
+from . import models
 
 # ── Configurable Constants ───────────────────────────────────────────
 GROQ_MIN_INTERVAL: float = float(os.environ.get("GROQ_MIN_INTERVAL", "2.0"))
 GROQ_RPM_CEILING: int = int(os.environ.get("GROQ_RPM_CEILING", "30"))
 
-GEMINI_MIN_INTERVAL: float = float(os.environ.get("GEMINI_MIN_INTERVAL", "4.0"))
+GEMINI_MIN_INTERVAL: float = float(os.environ.get("GEMINI_MIN_INTERVAL", os.environ.get("RATE_LIMIT_SLEEP_SECONDS", "7.0")))
 GEMINI_RPM_CEILING: int = int(os.environ.get("GEMINI_RPM_CEILING", "15"))
 
 CALL_TIMEOUT_SECONDS: float = float(os.environ.get("OCR_TIMEOUT_SECONDS", "60.0"))
@@ -38,6 +39,9 @@ COOLDOWN_GROWTH_FACTOR: float = float(os.environ.get("OCR_COOLDOWN_GROWTH_FACTOR
 
 TRANSIENT_RETRY_BASE_SECONDS: float = float(os.environ.get("OCR_RETRY_BASE_SECONDS", "1.0"))
 TRANSIENT_RETRY_JITTER_SECONDS: float = float(os.environ.get("OCR_RETRY_JITTER_SECONDS", "0.5"))
+
+GROQ_VISION_MODEL: str = os.environ.get("GROQ_VISION_MODEL", "llama-4-scout")
+GEMINI_VISION_MODEL: str = os.environ.get("GEMINI_VISION_MODEL", "gemini-3.6-flash")
 
 OCR_PAGE_BUDGET: int = int(os.environ.get("OCR_PAGE_BUDGET", "60"))
 
@@ -158,32 +162,20 @@ def _try_groq(
     page: int | None = None,
     document_id: str | None = None,
 ) -> tuple[str, str]:
-    from openai import OpenAI
-
-    client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1", timeout=CALL_TIMEOUT_SECONDS)
-    b64 = base64.b64encode(png_bytes).decode()
-
     t0 = time.monotonic()
-    resp = client.chat.completions.create(
-        model="llama-4-scout",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-            ],
-        }],
-        temperature=0,
+    candidate_models = [GROQ_VISION_MODEL, "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+    text, used_model = models.vision(
+        images=[png_bytes],
+        prompt=prompt,
+        models=candidate_models,
     )
     latency = int((time.monotonic() - t0) * 1000)
-    text = resp.choices[0].message.content or ""
-    tokens = resp.usage.total_tokens if resp.usage else None
 
     target = {"document_id": document_id, "page": page} if (document_id or page is not None) else None
     meta = {
         "provider": "groq-vision",
+        "model": used_model,
         "latency_ms": latency,
-        "approx_tokens": tokens,
     }
     if page is not None:
         meta["page"] = page
@@ -198,39 +190,26 @@ def _try_gemini(
     page: int | None = None,
     document_id: str | None = None,
 ) -> tuple[str, str]:
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client(
-        api_key=api_key,
-        http_options=types.HttpOptions(timeout=int(CALL_TIMEOUT_SECONDS * 1000)),
-    )
-
     t0 = time.monotonic()
-    resp = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=[
-            prompt,
-            types.Part.from_bytes(data=png_bytes, mime_type="image/png"),
-        ],
-        config=types.GenerateContentConfig(temperature=0),
+    candidate_models = [GEMINI_VISION_MODEL, "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+    text, used_model = models.vision(
+        images=[png_bytes],
+        prompt=prompt,
+        models=candidate_models,
     )
     latency = int((time.monotonic() - t0) * 1000)
-    text = resp.text or ""
-    tokens = None
-    if hasattr(resp, "usage_metadata") and resp.usage_metadata:
-        tokens = getattr(resp.usage_metadata, "total_token_count", None)
 
     target = {"document_id": document_id, "page": page} if (document_id or page is not None) else None
     meta = {
         "provider": "gemini-vision",
+        "model": used_model,
         "latency_ms": latency,
-        "approx_tokens": tokens,
     }
     if page is not None:
         meta["page"] = page
     db.audit("ocr", target=target, meta=meta)
     return text, "gemini-vision"
+
 
 
 # ── Round-Robin Router with Cooldown & Failover ───────────────────────
@@ -243,12 +222,24 @@ class OcrRouter:
         document_id: str | None = None,
         groq_state: ProviderState | None = None,
         gemini_state: ProviderState | None = None,
+        providers: list[ProviderState] | None = None,
         call_fn: Callable[[str, bytes, str, int | None, str | None], tuple[str, str]] | None = None,
     ):
         self.document_id = document_id
         self.groq_state = groq_state or _groq_state
         self.gemini_state = gemini_state or _gemini_state
-        self.providers = [self.groq_state, self.gemini_state]
+        if providers is not None:
+            self.providers = providers
+        elif groq_state is not None and gemini_state is not None:
+            self.providers = [self.groq_state, self.gemini_state]
+        else:
+            ocr_mode = os.environ.get("OCR_PROVIDER", "gemini").lower()
+            if ocr_mode == "gemini":
+                self.providers = [self.gemini_state]
+            elif ocr_mode == "groq":
+                self.providers = [self.groq_state]
+            else:
+                self.providers = [self.gemini_state, self.groq_state]
         self.next_provider_idx = 0
         self._call_fn = call_fn
 
@@ -270,31 +261,31 @@ class OcrRouter:
             raise ValueError(f"Unknown provider: {provider_name}")
 
     def transcribe_page(self, png_bytes: bytes, page: int = 0) -> tuple[str, str]:
-        """Transcribe a page using rate-limited round-robin with failover."""
+        """Transcribe a page using rate-limited OCR with failover/pacing."""
         # 1. Determine scheduled provider
-        scheduled_idx = self.next_provider_idx
-        self.next_provider_idx = (self.next_provider_idx + 1) % len(self.providers)
-
+        scheduled_idx = self.next_provider_idx % len(self.providers)
+        self.next_provider_idx = (scheduled_idx + 1) % len(self.providers)
         scheduled = self.providers[scheduled_idx]
-        alternative = self.providers[1 - scheduled_idx]
 
-        # 2. Select initial candidate order (failover to healthy if scheduled is cooling)
-        if scheduled.is_cooling_down():
-            if not alternative.is_cooling_down():
-                candidates = [alternative, scheduled]
-            else:
-                # Both are cooling -> wait for earliest recovery
-                earliest_recovery = min(scheduled.cooldown_until, alternative.cooldown_until)
-                wait_sec = earliest_recovery - time.monotonic()
+        if len(self.providers) == 1:
+            if scheduled.is_cooling_down():
+                wait_sec = scheduled.cooldown_until - time.monotonic()
                 if wait_sec > 0:
                     time.sleep(wait_sec)
-                # After waiting, prioritize whichever is now recovered
-                if not scheduled.is_cooling_down():
-                    candidates = [scheduled, alternative]
-                else:
-                    candidates = [alternative, scheduled]
+            candidates = [scheduled]
         else:
-            candidates = [scheduled, alternative]
+            alternative = self.providers[1 - scheduled_idx]
+            if scheduled.is_cooling_down():
+                if not alternative.is_cooling_down():
+                    candidates = [alternative, scheduled]
+                else:
+                    earliest_recovery = min(scheduled.cooldown_until, alternative.cooldown_until)
+                    wait_sec = earliest_recovery - time.monotonic()
+                    if wait_sec > 0:
+                        time.sleep(wait_sec)
+                    candidates = [scheduled, alternative] if not scheduled.is_cooling_down() else [alternative, scheduled]
+            else:
+                candidates = [scheduled, alternative]
 
         error_history: list[str] = []
 

@@ -84,18 +84,6 @@ export interface Fact {
   relations?: FactRelation[];
 }
 
-export interface CellDetail {
-  fact_ids: string[];
-  badge: RelationType | null;
-}
-
-export interface MatrixData {
-  entities: string[];
-  attributes: string[];
-  cells: Record<string, CellDetail>;
-  cell_facts: Record<string, string[]>;
-  cell_badges: Record<string, RelationType | null>;
-}
 
 export interface RelationRow {
   id: string;
@@ -120,19 +108,131 @@ export interface AuditRow {
 }
 
 export interface Citation {
+  index?: number;
   fact_id: string;
   page?: number;
   filename?: string;
   quote?: string;
+  entity?: string;
+  attribute?: string;
+  raw_value?: string;
+  confidence?: number;
 }
 
 export interface ChatResponse {
   answer: string;
   citations: Citation[];
+  blocks?: any[];
 }
 
 export interface UploadResponse {
   document_id: string;
   job_id: string | null;
   dedupe?: boolean;
+}
+
+export type ReviewStatus = "pending" | "approved" | "rejected" | "deferred";
+
+export interface ReviewItem {
+  id: string;
+  fact_id?: string | null;
+  relation_id?: string | null;
+  reason: string; // 'anomaly:benford' | 'anomaly:zscore' | 'anomaly:period_swing' | 'contradiction' | 'low_confidence' etc.
+  status: ReviewStatus;
+  decision?: string;
+  reviewer?: string;
+  created_at?: string;
+  reviewed_at?: string;
+  // Joined fact & doc metadata
+  entity_canon?: string;
+  attribute_canon?: string;
+  raw_value?: string;
+  norm_value?: number | null;
+  fact_confidence?: number;
+  quote?: string;
+  filename?: string;
+  document_id?: string;
+  page?: number;
+  bbox?: [number, number, number, number];
+  // Counterpart metadata for cross-document contradictions/variances
+  counterpart?: {
+    id: string;
+    entity_canon?: string;
+    attribute_canon?: string;
+    raw_value?: string;
+    norm_value?: number | null;
+    quote?: string;
+    filename?: string;
+    document_id?: string;
+    page?: number;
+    bbox?: [number, number, number, number];
+  };
+}
+
+export interface ReviewStats {
+  pending: number;
+  approved: number;
+  rejected: number;
+  deferred: number;
+  total?: number;
+}
+
+
+export type FindingCategory =
+  | "contradiction"
+  | "anomaly"
+  | "missing_disclosure"
+  | "computational_error"
+  | "contextual_variance";
+
+export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
+
+export type FindingStatus = "open" | "confirmed" | "dismissed" | "resolved";
+
+export interface Finding {
+  id: string;
+  case_id?: string | null;
+  category: FindingCategory;
+  severity: FindingSeverity;
+  title: string;
+  description: string;
+  explanation?: string | null;
+  fact_ids: string[];
+  relation_ids: string[];
+  evidence_ids: string[];
+  document_ids: string[];
+  details: Record<string, any>;
+  status: FindingStatus;
+  created_at: string;
+  fact_details?: Array<{
+    id: string;
+    entity_canon?: string;
+    attribute_canon?: string;
+    raw_value?: string;
+    norm_value?: number | null;
+    period?: string;
+    scope?: string;
+    quote?: string;
+    page?: number;
+    filename?: string;
+    confidence?: number;
+  }>;
+}
+
+export interface FindingsSummary {
+  total: number;
+  by_severity: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+    info: number;
+  };
+  by_category: Record<string, number>;
+  by_status: {
+    open: number;
+    confirmed: number;
+    dismissed: number;
+    resolved: number;
+  };
 }

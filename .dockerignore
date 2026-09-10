@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+web/
+.next/
+node_modules/
+starter-datasets/
+superjoin-vit-2026-assignment.pdf
+tests/
+[0-9].txt
+!requirements.txt

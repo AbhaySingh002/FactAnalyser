@@ -137,7 +137,7 @@ export function EvidenceSheet({
             )}
           </div>
           <SheetDescription className="text-xs text-muted-foreground mt-0.5">
-            Cryptographic document provenance, bounding-box evidence, and cross-reconciliation history.
+            Document provenance and extraction history.
           </SheetDescription>
         </SheetHeader>
 

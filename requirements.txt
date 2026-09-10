@@ -7,3 +7,4 @@ PyMuPDF
 openai
 google-genai
 rapidfuzz
+openrouter

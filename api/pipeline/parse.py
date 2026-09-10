@@ -1,26 +1,117 @@
-"""Parse PDF with PyMuPDF — layout-aware chunking with bboxes and reading-order preservation."""
+"""Parse PDF with PyMuPDF — layout-aware parsing, first-class table extraction, and coordinate provenance.
+
+Guarantees:
+1. NEVER drop a page: every page produces an explicit record with dimensions and route status.
+2. First-class tables: row, col, header, cell coordinates, and unit/currency hints preserved.
+3. Reading-order preservation with 2-column detection.
+4. Bounding boxes in 72 DPI PDF point space.
+"""
 
 from __future__ import annotations
 
+import re
 import statistics
-from dataclasses import dataclass
-
+from dataclasses import dataclass, field
 import pymupdf as fitz
 
-SCAN_THRESHOLD = 40  # Characters below this threshold -> scanned/image page
+SCAN_CHAR_THRESHOLD = 40  # Under 40 chars text -> scanned / image page
+
+
+@dataclass
+class SectionData:
+    page_number: int
+    title: str
+    level: int = 1
+    section_type: str = "narrative"
+    reading_order: int = 0
+
+
+@dataclass
+class TableData:
+    page_number: int
+    table_index: int
+    bbox: list[float] | None
+    headers: list[str]
+    rows: list[list[str]]
+    markdown_repr: str
+    title: str | None = None
+    unit_hint: str | None = None
+    currency_hint: str | None = None
+    period_hint: str | None = None
+    cells_data: list[dict] = field(default_factory=list)
 
 
 @dataclass
 class ChunkData:
-    page: int
-    chunk_type: str          # 'paragraph', 'table', 'heading'
+    page_number: int
+    chunk_type: str  # 'paragraph', 'table', 'heading', 'footnote'
     text: str
-    bbox: list[float] | None  # [x0, y0, x1, y1] in PDF points (top-left origin)
+    bbox: list[float] | None
     heading: str | None = None
+    table_index: int | None = None
+    reading_order: int = 0
+
+
+@dataclass
+class PageParseResult:
+    page_number: int  # 1-indexed
+    width: float
+    height: float
+    route: str        # 'text', 'scan', 'mixed', 'empty', 'error'
+    char_count: int
+    table_count: int
+    sections: list[SectionData] = field(default_factory=list)
+    tables: list[TableData] = field(default_factory=list)
+    chunks: list[ChunkData] = field(default_factory=list)
+    error: str | None = None
+
+
+def _detect_table_hints(headers: list[str], context_text: str = "") -> tuple[str | None, str | None, str | None]:
+    """Detect currency, unit multiplier, and period hints from table headers and surrounding text."""
+    full_text = " ".join(headers) + " " + context_text
+    lower = full_text.lower()
+
+    # 1. Currency hint
+    curr = None
+    if any(k in lower for k in ["₹", "inr", "rupee", "rs.", "rs "]):
+        curr = "INR"
+    elif any(k in lower for k in ["$", "usd", "dollar"]):
+        curr = "USD"
+    elif any(k in lower for k in ["€", "eur", "euro"]):
+        curr = "EUR"
+    elif any(k in lower for k in ["£", "gbp", "pound"]):
+        curr = "GBP"
+
+    # 2. Unit multiplier hint
+    unit = None
+    if re.search(r"\b(?:in\s+)?(?:crore|crores|cr\.?)\b", lower):
+        unit = "crore"
+    elif re.search(r"\b(?:in\s+)?(?:lakh|lakhs|lac|lacs)\b", lower):
+        unit = "lakh"
+    elif re.search(r"\b(?:in\s+)?(?:million|millions|mn\.?)\b", lower):
+        unit = "million"
+    elif re.search(r"\b(?:in\s+)?(?:billion|billions|bn\.?)\b", lower):
+        unit = "billion"
+    elif re.search(r"\b(?:in\s+)?(?:thousand|thousands|k)\b", lower):
+        unit = "thousand"
+    elif "%" in full_text or "percent" in lower:
+        unit = "pct"
+
+    # 3. Period hint
+    period = None
+    m_fy = re.search(r"\b(FY\s*20?\d{2})\b", full_text, re.IGNORECASE)
+    if m_fy:
+        period = m_fy.group(1).upper().replace(" ", "")
+    else:
+        m_q = re.search(r"\b(Q[1-4]\s*(?:FY)?\s*20?\d{2})\b", full_text, re.IGNORECASE)
+        if m_q:
+            period = m_q.group(1).upper().replace(" ", "")
+
+    return unit, curr, period
 
 
 def sort_blocks_reading_order(blocks: list[dict], page_width: float) -> list[dict]:
-    """Sort text blocks by reading order, respecting 2-column layouts via x-gap heuristic."""
+    """Sort text blocks in reading order, respecting 2-column layouts via midline analysis."""
     if len(blocks) <= 1:
         return blocks
 
@@ -38,7 +129,6 @@ def sort_blocks_reading_order(blocks: list[dict], page_width: float) -> list[dic
         else:
             spanning_blocks.append(b)
 
-    # If both columns contain multiple blocks, sort column-wise
     if len(left_blocks) >= 2 and len(right_blocks) >= 2:
         left_sorted = sorted(left_blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
         right_sorted = sorted(right_blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
@@ -53,70 +143,104 @@ def sort_blocks_reading_order(blocks: list[dict], page_width: float) -> list[dic
         res.extend(sorted(bottom_spanning, key=lambda b: (b["bbox"][1], b["bbox"][0])))
         return res
 
-    # Single column or irregular: sort primarily by vertical position with a small 6pt quantization bucket
     return sorted(blocks, key=lambda b: (round(b["bbox"][1] / 6.0) * 6.0, b["bbox"][0]))
 
 
-def parse_pdf(pdf_bytes: bytes) -> tuple[list[ChunkData], list[int], list[int], list[int]]:
-    """Parse PDF bytes with layout awareness, heading propagation, and error isolation.
+def parse_pdf(pdf_bytes: bytes) -> list[PageParseResult]:
+    """Parse every page of a PDF document with full layout, table, section, and reading-order extraction.
 
-    Returns (chunks, text_pages, scan_pages, error_pages).
+    Guarantees: Returns exactly len(doc) PageParseResult objects. NEVER drops a page.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    chunks: list[ChunkData] = []
-    text_pages: list[int] = []
-    scan_pages: list[int] = []
-    error_pages: list[int] = []
-
+    results: list[PageParseResult] = []
     current_heading: str | None = None
+    reading_order_counter = 0
 
-    for page_num in range(len(doc)):
+    for page_idx in range(len(doc)):
+        page_num = page_idx + 1  # 1-indexed
+        page = doc[page_idx]
+        rect = page.rect
+        width, height = float(rect.width), float(rect.height)
+
         try:
-            page = doc[page_num]
             raw_text = page.get_text().strip()
+            char_count = len(raw_text)
 
-            # Triage text vs scan
-            if len(raw_text) < SCAN_THRESHOLD:
-                scan_pages.append(page_num)
+            # Handle scanned / image-only page
+            if char_count < SCAN_CHAR_THRESHOLD:
+                results.append(
+                    PageParseResult(
+                        page_number=page_num,
+                        width=width,
+                        height=height,
+                        route="scan" if char_count > 0 or len(page.get_images()) > 0 else "empty",
+                        char_count=char_count,
+                        table_count=0,
+                    )
+                )
                 continue
 
-            text_pages.append(page_num)
-            page_width = float(page.rect.width)
-
-            # ── 1. Table Extraction (Markdown tables with header context) ─
+            # ── 1. Extract First-Class Tables ────────────────────────
             table_bboxes: list[fitz.Rect] = []
+            extracted_tables: list[TableData] = []
+            table_index = 0
+
             try:
                 tables = page.find_tables()
-                for table in tables:
-                    t_bbox = [float(v) for v in table.bbox]
+                for t in tables:
+                    t_bbox = [round(float(v), 2) for v in t.bbox]
                     table_bboxes.append(fitz.Rect(t_bbox))
-                    cells = table.extract()
+                    cells = t.extract()
                     if not cells or len(cells) < 1:
                         continue
 
-                    header = cells[0]
-                    lines = ["| " + " | ".join(str(c or "").strip() for c in header) + " |"]
-                    lines.append("| " + " | ".join("---" for _ in header) + " |")
-                    for row in cells[1:]:
-                        lines.append("| " + " | ".join(str(c or "").strip() for c in row) + " |")
+                    raw_header = cells[0]
+                    clean_header = [str(c or "").strip() for c in raw_header]
+                    rows_data = [[str(c or "").strip() for c in r] for r in cells[1:]]
 
-                    chunks.append(
-                        ChunkData(
-                            page=page_num,
-                            chunk_type="table",
-                            text="\n".join(lines),
-                            bbox=t_bbox,
-                            heading=current_heading,
-                        )
+                    # Markdown table representation
+                    lines = ["| " + " | ".join(clean_header) + " |"]
+                    lines.append("| " + " | ".join("---" for _ in clean_header) + " |")
+                    for r in rows_data:
+                        lines.append("| " + " | ".join(r) + " |")
+                    md_repr = "\n".join(lines)
+
+                    unit_h, curr_h, period_h = _detect_table_hints(clean_header, current_heading or "")
+
+                    # Cell-level coordinates
+                    cells_data = []
+                    for r_idx, row in enumerate(cells):
+                        for c_idx, cell_val in enumerate(row):
+                            hdr = clean_header[c_idx] if c_idx < len(clean_header) else ""
+                            cells_data.append({
+                                "row": r_idx,
+                                "col": c_idx,
+                                "header": hdr,
+                                "value": str(cell_val or "").strip(),
+                            })
+
+                    table_obj = TableData(
+                        page_number=page_num,
+                        table_index=table_index,
+                        bbox=t_bbox,
+                        headers=clean_header,
+                        rows=rows_data,
+                        markdown_repr=md_repr,
+                        title=current_heading,
+                        unit_hint=unit_h,
+                        currency_hint=curr_h,
+                        period_hint=period_h,
+                        cells_data=cells_data,
                     )
+                    extracted_tables.append(table_obj)
+                    table_index += 1
             except Exception:
-                pass  # degrade gracefully if table finder fails on complex graphics
+                pass  # Degrade gracefully if table finder encounters irregular graphics
 
-            # ── 2. Paragraph & Heading Extraction ────────────────────────
+            # ── 2. Extract Narrative, Headings & Footnotes ────────────
             page_dict = page.get_text("dict")
             raw_blocks = [b for b in page_dict.get("blocks", []) if b.get("type") == 0]
 
-            # Collect font sizes to calculate median body size
             font_sizes: list[float] = []
             for b in raw_blocks:
                 for line in b.get("lines", []):
@@ -124,68 +248,133 @@ def parse_pdf(pdf_bytes: bytes) -> tuple[list[ChunkData], list[int], list[int], 
                         if span["text"].strip():
                             font_sizes.append(float(span["size"]))
 
-            median_size = statistics.median(font_sizes) if font_sizes else 12.0
+            median_size = statistics.median(font_sizes) if font_sizes else 10.0
+            sorted_blocks = sort_blocks_reading_order(raw_blocks, width)
 
-            # Sort blocks to preserve reading order (column-aware)
-            sorted_blocks = sort_blocks_reading_order(raw_blocks, page_width)
+            page_sections: list[SectionData] = []
+            page_chunks: list[ChunkData] = []
 
             for b in sorted_blocks:
                 b_rect = fitz.Rect(b["bbox"])
-                # Skip text already encapsulated inside a table
+                # Skip text already included in extracted tables
                 if any(b_rect.intersects(tr) for tr in table_bboxes):
                     continue
 
-                para_lines: list[str] = []
+                lines_text: list[str] = []
                 is_heading = False
+                is_footnote = False
                 union_x0, union_y0, union_x1, union_y1 = float("inf"), float("inf"), float("-inf"), float("-inf")
 
                 for line in b.get("lines", []):
-                    line_text = "".join(span["text"] for span in line.get("spans", []))
-                    if line_text.strip():
-                        para_lines.append(line_text)
+                    lt = "".join(s["text"] for s in line.get("spans", []))
+                    if lt.strip():
+                        lines_text.append(lt)
 
-                    # Update union bounding box in PDF points
                     lx0, ly0, lx1, ly1 = line["bbox"]
-                    union_x0 = min(union_x0, lx0)
-                    union_y0 = min(union_y0, ly0)
-                    union_x1 = max(union_x1, lx1)
-                    union_y1 = max(union_y1, ly1)
+                    union_x0, union_y0 = min(union_x0, lx0), min(union_y0, ly0)
+                    union_x1, union_y1 = max(union_x1, lx1), max(union_y1, ly1)
 
-                    for span in line.get("spans", []):
-                        if span["text"].strip() and float(span["size"]) > median_size * 1.2:
-                            is_heading = True
+                    for s in line.get("spans", []):
+                        sz = float(s.get("size", 10.0))
+                        if s["text"].strip():
+                            if sz > median_size * 1.2:
+                                is_heading = True
+                            elif sz < median_size * 0.85:
+                                is_footnote = True
 
-                text = "\n".join(para_lines).strip()
+                text = "\n".join(lines_text).strip()
                 if not text:
                     continue
 
                 union_bbox = [round(union_x0, 2), round(union_y0, 2), round(union_x1, 2), round(union_y1, 2)]
+                reading_order_counter += 1
 
                 if is_heading:
                     current_heading = text.split("\n")[0]
-                    chunks.append(
+                    page_sections.append(
+                        SectionData(
+                            page_number=page_num,
+                            title=current_heading,
+                            level=1 if median_size * 1.4 < font_sizes[0] else 2,
+                            section_type="heading",
+                            reading_order=reading_order_counter,
+                        )
+                    )
+                    page_chunks.append(
                         ChunkData(
-                            page=page_num,
+                            page_number=page_num,
                             chunk_type="heading",
                             text=text,
                             bbox=union_bbox,
                             heading=current_heading,
+                            reading_order=reading_order_counter,
+                        )
+                    )
+                elif is_footnote:
+                    page_chunks.append(
+                        ChunkData(
+                            page_number=page_num,
+                            chunk_type="footnote",
+                            text=text,
+                            bbox=union_bbox,
+                            heading=current_heading,
+                            reading_order=reading_order_counter,
                         )
                     )
                 else:
-                    chunks.append(
+                    page_chunks.append(
                         ChunkData(
-                            page=page_num,
+                            page_number=page_num,
                             chunk_type="paragraph",
                             text=text,
                             bbox=union_bbox,
                             heading=current_heading,
+                            reading_order=reading_order_counter,
                         )
                     )
 
-        except Exception:
-            # Failure isolation: one bad page does not abort document parsing
-            error_pages.append(page_num)
+            # Also register tables as standalone chunks for semantic windowing
+            for tbl in extracted_tables:
+                reading_order_counter += 1
+                page_chunks.append(
+                    ChunkData(
+                        page_number=page_num,
+                        chunk_type="table",
+                        text=tbl.markdown_repr,
+                        bbox=tbl.bbox,
+                        heading=tbl.title,
+                        table_index=tbl.table_index,
+                        reading_order=reading_order_counter,
+                    )
+                )
+
+            results.append(
+                PageParseResult(
+                    page_number=page_num,
+                    width=width,
+                    height=height,
+                    route="text",
+                    char_count=char_count,
+                    table_count=len(extracted_tables),
+                    sections=page_sections,
+                    tables=extracted_tables,
+                    chunks=page_chunks,
+                )
+            )
+
+        except Exception as ex:
+            # Failure isolation: error on one page records explicit error status, never drops page
+            results.append(
+                PageParseResult(
+                    page_number=page_num,
+                    width=width,
+                    height=height,
+                    route="error",
+                    char_count=0,
+                    table_count=0,
+                    error=str(ex),
+                )
+            )
 
     doc.close()
-    return chunks, text_pages, scan_pages, error_pages
+    return results
